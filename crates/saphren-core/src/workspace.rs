@@ -53,6 +53,10 @@ impl Workspace {
         &self.root
     }
 
+    pub(crate) fn from_canonical_root(root: PathBuf) -> Self {
+        Self { root }
+    }
+
     /// Lists all `.md` files under the workspace (or an optional `subpath`),
     /// returning sorted, forward-slash paths relative to `workspace_root`.
     pub fn list_files(&self, subpath: Option<&str>) -> Result<Vec<String>, WorkspaceError> {

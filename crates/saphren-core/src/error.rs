@@ -27,6 +27,18 @@ pub enum WorkspaceError {
     #[error("path is not a file: {path}")]
     NotAFile { path: String },
 
+    /// No workspace folder is currently open.
+    #[error("no workspace is currently open")]
+    NoWorkspaceOpen,
+
+    /// No file is currently open in the editor buffer.
+    #[error("no file is currently open")]
+    NoActiveFile,
+
+    /// Attempted to update a buffer for a path that does not match the active file.
+    #[error("path '{requested}' does not match active open file '{active}'")]
+    ActiveFileMismatch { active: String, requested: String },
+
     /// An underlying filesystem I/O error.
     #[error("i/o error at '{}': {source}", path.display())]
     Io {

@@ -4,10 +4,16 @@
 //! Zero UI or Tauri dependencies.
 
 mod error;
+mod hash;
+mod proposal;
 mod sandbox;
+mod state;
 mod workspace;
 
 pub use error::WorkspaceError;
+pub use hash::sha256_hex;
+pub use proposal::{DiffLine, PendingChange, ProposalId};
+pub use state::{FileContent, OpenFileBuffer, WorkspaceState};
 pub use workspace::{SearchMatch, Workspace};
 
 /// Crate version of `saphren-core`.

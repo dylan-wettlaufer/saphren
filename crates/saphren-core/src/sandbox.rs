@@ -281,6 +281,21 @@ pub(crate) fn to_relative_string(root: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// Lexically normalizes a workspace-relative path and formats it with forward slashes.
+pub(crate) fn normalize_relative_string(rel_path: &str) -> Result<String, WorkspaceError> {
+    let normalized = normalize_relative(rel_path)?;
+    let mut parts = Vec::new();
+    for component in normalized.components() {
+        if let Component::Normal(seg) = component {
+            let seg_str = seg.to_str().ok_or_else(|| WorkspaceError::NotFound {
+                path: rel_path.to_owned(),
+            })?;
+            parts.push(seg_str);
+        }
+    }
+    Ok(parts.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
