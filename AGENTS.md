@@ -39,3 +39,8 @@ All commit messages **must** strictly follow [Conventional Commits](https://www.
 - `fix(ui): prevent conflict banner flicker on buffer sync`
 - `test(core): cover dirty buffer conflict on proposal accept`
 - `docs: add v0.1 spec and architecture`
+
+### Branch Naming
+- **Format:** `<type>/<short-kebab-description>`
+- **Prefixes:** `feat/`, `fix/`, `refactor/`, `docs/`, `chore/`, `test/`
+- **Examples:** `feat/mcp-propose-edit`, `fix/dirty-buffer-conflict`, `chore/tauri-specta-setup`
