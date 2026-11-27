@@ -1,1 +1,12 @@
 docs/.obsidian
+
+# Node / Frontend
+node_modules/
+dist/
+
+# Rust / Tauri
+target/
+src-tauri/gen/
+
+# OS
+.DS_Store
