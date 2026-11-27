@@ -44,3 +44,13 @@ All commit messages **must** strictly follow [Conventional Commits](https://www.
 - **Format:** `<type>/<short-kebab-description>`
 - **Prefixes:** `feat/`, `fix/`, `refactor/`, `docs/`, `chore/`, `test/`
 - **Examples:** `feat/mcp-propose-edit`, `fix/dirty-buffer-conflict`, `chore/tauri-specta-setup`
+
+## Comments
+- Write concise comments **only** for non-obvious logic, invariants, or edge-case workarounds (explain *why*, never *what*).
+- Do not narrate self-explanatory code or add redundant docstrings to private helpers.
+- Use brief `///` doc comments on public Rust types and functions in `saphren-core` and `saphren-mcp`.
+
+## Testing
+- **Focus tests on `saphren-core` and `saphren-mcp`:** Test invariants, state transitions, and edge cases (path traversal/symlink escapes, dirty-buffer conflicts, `base_hash` mismatches on `accept_proposal`, `read_file` returning live unsaved buffers, and `propose_edit` never writing to disk).
+- **Skip trivial UI tests:** Do not add frontend unit tests for basic component rendering, layout, or styling. Rely on `tsc --noEmit` and `tauri-specta` for frontend contract safety in v0.1.
+- Write a targeted regression test when fixing a non-trivial bug in Rust.
