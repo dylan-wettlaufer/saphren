@@ -6,6 +6,9 @@ export type WorkspaceErrorCode =
   | "NotFound"
   | "NotADirectory"
   | "NotAFile"
+  | "NoOpenFile"
+  | "ActiveFileMismatch"
+  | "UnsavedChanges"
   | "Io";
 
 /** Error thrown by sandboxed workspace operations in `src/core`. */
@@ -66,6 +69,26 @@ export class WorkspaceError extends Error {
 
   static notAFile(targetPath: string): WorkspaceError {
     return new WorkspaceError("NotAFile", targetPath, `path is not a file: ${targetPath}`);
+  }
+
+  static noOpenFile(): WorkspaceError {
+    return new WorkspaceError("NoOpenFile", "", "no file is currently open");
+  }
+
+  static activeFileMismatch(targetPath: string, activePath: string): WorkspaceError {
+    return new WorkspaceError(
+      "ActiveFileMismatch",
+      targetPath,
+      `path '${targetPath}' does not match active open file '${activePath}'`,
+    );
+  }
+
+  static unsavedChanges(activePath: string): WorkspaceError {
+    return new WorkspaceError(
+      "UnsavedChanges",
+      activePath,
+      `active file '${activePath}' has unsaved changes`,
+    );
   }
 
   static io(targetPath: string, cause: unknown): WorkspaceError {

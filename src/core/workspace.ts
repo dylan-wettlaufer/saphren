@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { WorkspaceError } from "./error";
+import { hashContent } from "./hash";
 import * as sandbox from "./sandbox";
 
 let tempFileCounter = 0;
@@ -22,6 +23,25 @@ function getErrnoCode(err: unknown): string | undefined {
     return typeof code === "string" ? code : undefined;
   }
   return undefined;
+}
+
+export function matchContentLines(
+  relPath: string,
+  content: string,
+  needleLower: string,
+  matches: SearchMatch[],
+): void {
+  const lines = splitLines(content);
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const line = lines[idx]!;
+    if (line.toLowerCase().includes(needleLower)) {
+      matches.push({
+        path: relPath,
+        line: idx + 1,
+        snippet: line,
+      });
+    }
+  }
 }
 
 function splitLines(content: string): string[] {
@@ -130,17 +150,7 @@ export class Workspace {
         continue;
       }
 
-      const lines = splitLines(content);
-      for (let idx = 0; idx < lines.length; idx += 1) {
-        const line = lines[idx]!;
-        if (line.toLowerCase().includes(needle)) {
-          matches.push({
-            path: relPath,
-            line: idx + 1,
-            snippet: line,
-          });
-        }
-      }
+      matchContentLines(relPath, content, needle, matches);
     }
 
     return matches;
@@ -160,6 +170,11 @@ export class Workspace {
     } catch (err) {
       throw WorkspaceError.io(canonical, err);
     }
+  }
+
+  /** Computes the SHA-256 hex digest of a `.md` file on disk inside the workspace sandbox. */
+  hashFile(relPath: string): string {
+    return hashContent(this.readFile(relPath));
   }
 
   /**

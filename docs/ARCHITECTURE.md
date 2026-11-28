@@ -40,7 +40,7 @@ saphren/
 
 - **`WorkspaceState`** (owned in the Electron main process):
   - `root: string | null`
-  - `openFile: OpenFileBuffer | null` (tracks the active file's relative path, live unsaved text, `diskHash`, and `isDirty`)
+  - `openFile: OpenFileBuffer | null` (tracks the active file's relative path, live unsaved text, `contentHash`, `diskHash`, `isDirty`, and `hasExternalConflict`)
   - `proposals: Map<string, PendingChange>` (keyed by UUID; at most one active pending proposal per file path in v0.1—a new `propose_edit` for the same path replaces the prior proposal)
 - **`PendingChange`**:
   - `id: string`
@@ -55,10 +55,10 @@ saphren/
 
 **Active File Lifecycle**
 
-- `Clean` → user types → `Dirty`
-- `Dirty` → user hits `Cmd/Ctrl+S` → `Clean` (writes atomically to disk, updates `diskHash`)
-- `Clean` → file watcher detects external disk edit → silently reloads buffer and emits `file:reloaded`
-- `Dirty` → file watcher detects external disk edit → `ExternalConflict` (UI prompts **Reload** via `reloadActiveFile()` vs. **Keep Local** via `saveActiveFile()`)
+- `Clean` → user types → `Dirty` (`isDirty` is derived from `contentHash !== diskHash || hasExternalConflict`, so reverting back to saved text returns to `Clean`)
+- `Dirty` → user hits `Cmd/Ctrl+S` → verifies disk hash matches `diskHash` before writing atomically to disk and updating `diskHash` → `Clean` (if disk diverged externally, transitions to `ExternalConflict` unless forced with `{ force: true }`)
+- `Clean` → file watcher detects external disk edit → silently reloads buffer and emits `file:reloaded` (if deleted on disk while clean, closes `openFile`)
+- `Dirty` → file watcher detects external disk edit or deletion → `ExternalConflict` (UI prompts **Reload** via `reloadActiveFile()` when file still exists vs. **Keep Local** via `saveActiveFile({ force: true })` or **Close** via `closeActiveFile({ discardDirty: true })`)
 
 **Proposal Lifecycle**
 
@@ -91,10 +91,11 @@ All IPC channel names, command signatures, and event payloads live in `src/share
 
 - `pickWorkspace(): Promise<string | null>` _(opens Electron's native `dialog.showOpenDialog` folder picker in `src/main/` because `sandbox: true` and `nodeIntegration: false` prevent the renderer from reading real filesystem paths)_
 - `openWorkspace(path: string): Promise<WorkspaceSnapshot>`
-- `openFile(path: string): Promise<OpenFileView>`
-- `updateBuffer(path: string, content: string): Promise<void>` _(syncs live editor text to core so MCP `read_file` sees unsaved edits)_
-- `saveActiveFile(): Promise<void>`
-- `reloadActiveFile(): Promise<OpenFileView>` _(discards unsaved buffer edits and reloads the active file from disk, e.g., when choosing **Reload** on `ExternalConflict`)_
+- `openFile(path: string, options?: { discardDirty?: boolean }): Promise<OpenFileView>`
+- `closeActiveFile(options?: { discardDirty?: boolean }): Promise<void>`
+- `updateBuffer(path: string, content: string): Promise<OpenFileView>` _(syncs live editor text to core so MCP `read_file` sees unsaved edits)_
+- `saveActiveFile(options?: { force?: boolean }): Promise<SaveActiveFileResult>` _(verifies disk hash before writing; returns `{ status: "saved", buffer } | { status: "conflict", buffer, diskHash }`—pass `{ force: true }` for **Keep Local**)_
+- `reloadActiveFile(): Promise<OpenFileView>` _(discards unsaved buffer edits and reloads the active file from disk, e.g., when choosing **Reload** on `ExternalConflict`; throws `NotFound` if the file was deleted externally while keeping the dirty buffer intact)_
 - `acceptProposal(id: string, forceOverwrite: boolean): Promise<AcceptResult>`
 - `rejectProposal(id: string): Promise<void>`
 - `acceptAllProposals(): Promise<BatchAcceptResult>`
