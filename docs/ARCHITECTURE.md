@@ -41,7 +41,7 @@ saphren/
 - **`WorkspaceState`** (owned in the Electron main process):
   - `root: string | null`
   - `openFile: OpenFileBuffer | null` (tracks the active file's relative path, live unsaved text, `diskHash`, and `isDirty`)
-  - `proposals: Map<string, PendingChange>` (keyed by UUID; at most one active pending proposal per file path in v0.1, or latest replaces prior)
+  - `proposals: Map<string, PendingChange>` (keyed by UUID; at most one active pending proposal per file path in v0.1—a new `propose_edit` for the same path replaces the prior proposal)
 - **`PendingChange`**:
   - `id: string`
   - `path: string` (relative to workspace root)
@@ -58,7 +58,7 @@ saphren/
 - `Clean` → user types → `Dirty`
 - `Dirty` → user hits `Cmd/Ctrl+S` → `Clean` (writes atomically to disk, updates `diskHash`)
 - `Clean` → file watcher detects external disk edit → silently reloads buffer and emits `file:reloaded`
-- `Dirty` → file watcher detects external disk edit → `ExternalConflict` (UI prompts Reload vs. Keep Local)
+- `Dirty` → file watcher detects external disk edit → `ExternalConflict` (UI prompts **Reload** via `reloadActiveFile()` vs. **Keep Local** via `saveActiveFile()`)
 
 **Proposal Lifecycle**
 
@@ -89,10 +89,12 @@ All IPC channel names, command signatures, and event payloads live in `src/share
 
 ### Commands (Renderer → Main via `ipcRenderer.invoke`)
 
+- `pickWorkspace(): Promise<string | null>` _(opens Electron's native `dialog.showOpenDialog` folder picker in `src/main/` because `sandbox: true` and `nodeIntegration: false` prevent the renderer from reading real filesystem paths)_
 - `openWorkspace(path: string): Promise<WorkspaceSnapshot>`
 - `openFile(path: string): Promise<OpenFileView>`
 - `updateBuffer(path: string, content: string): Promise<void>` _(syncs live editor text to core so MCP `read_file` sees unsaved edits)_
 - `saveActiveFile(): Promise<void>`
+- `reloadActiveFile(): Promise<OpenFileView>` _(discards unsaved buffer edits and reloads the active file from disk, e.g., when choosing **Reload** on `ExternalConflict`)_
 - `acceptProposal(id: string, forceOverwrite: boolean): Promise<AcceptResult>`
 - `rejectProposal(id: string): Promise<void>`
 - `acceptAllProposals(): Promise<BatchAcceptResult>`
