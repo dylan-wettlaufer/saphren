@@ -5,15 +5,22 @@
  * Zero Electron or React dependencies.
  */
 
+export { computeLineDiff, type DiffLine, type DiffLineType } from "./diff";
 export { WorkspaceError, type WorkspaceErrorCode } from "./error";
 export { hasContentChanged, hashContent } from "./hash";
 export { Workspace, type SearchMatch } from "./workspace";
 export {
   WorkspaceState,
+  type AcceptAllProposalsResult,
+  type AcceptedProposalResult,
+  type AcceptProposalOptions,
+  type AcceptProposalResult,
   type CloseActiveFileOptions,
+  type ConflictedProposalResult,
   type DiskSyncResult,
   type OpenFileBuffer,
   type OpenFileOptions,
+  type PendingChange,
   type ReadFileResult,
   type SaveActiveFileOptions,
   type SaveActiveFileResult,

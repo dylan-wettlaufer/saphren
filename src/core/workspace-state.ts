@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { computeLineDiff, type DiffLine } from "./diff";
 import { WorkspaceError } from "./error";
 import { hashContent } from "./hash";
 import * as sandbox from "./sandbox";
@@ -76,6 +78,56 @@ export type DiskSyncResult =
       readonly diskHash: string | null;
     };
 
+/** A staged edit proposal awaiting explicit user approval. */
+export interface PendingChange {
+  /** Unique UUID identifying this proposal. */
+  readonly id: string;
+  /** Forward-slash path relative to the workspace root. */
+  readonly path: string;
+  /** SHA-256 hex digest of the file content at proposal time (live buffer if open, else disk). */
+  readonly baseHash: string;
+  /** Full proposed Markdown content to write if accepted. */
+  readonly proposedContent: string;
+  /** Human-readable explanation of why the edit was proposed. */
+  readonly reason: string;
+  /** Line-by-line diff from the base content to `proposedContent`. */
+  readonly diffLines: readonly DiffLine[];
+  /** ISO-8601 timestamp when the proposal was created. */
+  readonly createdAt: string;
+}
+
+/** Options controlling `WorkspaceState.acceptProposal`. */
+export interface AcceptProposalOptions {
+  /** When `true`, overwrites the file even if its content hash changed since proposal time. */
+  force?: boolean;
+}
+
+/** Outcome when a proposal is cleanly applied (or force-applied) to disk. */
+export interface AcceptedProposalResult {
+  readonly status: "accepted";
+  readonly id: string;
+  readonly path: string;
+  /** Updated open file snapshot if the accepted file is currently open, otherwise `null`. */
+  readonly openFile: OpenFileBuffer | null;
+}
+
+/** Outcome when accepting a proposal is blocked because the file changed since proposal time. */
+export interface ConflictedProposalResult {
+  readonly status: "conflict";
+  readonly proposal: PendingChange;
+  /** Current SHA-256 hex digest of the file (live buffer if open, else disk), or `null` if deleted on disk. */
+  readonly currentHash: string | null;
+}
+
+/** Discriminated outcome returned by `WorkspaceState.acceptProposal`. */
+export type AcceptProposalResult = AcceptedProposalResult | ConflictedProposalResult;
+
+/** Outcome returned by `WorkspaceState.acceptAllProposals`. */
+export interface AcceptAllProposalsResult {
+  readonly accepted: readonly AcceptedProposalResult[];
+  readonly conflicted: readonly ConflictedProposalResult[];
+}
+
 interface InternalBuffer {
   path: string;
   canonicalPath: string;
@@ -83,6 +135,17 @@ interface InternalBuffer {
   contentHash: string;
   diskHash: string;
   hasExternalConflict: boolean;
+}
+
+interface InternalProposal {
+  readonly id: string;
+  readonly path: string;
+  readonly canonicalPath: string;
+  readonly baseHash: string;
+  readonly proposedContent: string;
+  readonly reason: string;
+  readonly diffLines: readonly DiffLine[];
+  readonly createdAt: string;
 }
 
 function getErrnoCode(err: unknown): string | undefined {
@@ -112,13 +175,27 @@ function toSnapshot(buffer: InternalBuffer): OpenFileBuffer {
   };
 }
 
+function toProposalSnapshot(proposal: InternalProposal): PendingChange {
+  return {
+    id: proposal.id,
+    path: proposal.path,
+    baseHash: proposal.baseHash,
+    proposedContent: proposal.proposedContent,
+    reason: proposal.reason,
+    diffLines: proposal.diffLines.map((line) => ({ ...line })),
+    createdAt: proposal.createdAt,
+  };
+}
+
 /**
- * Stateful workspace controller owning the active in-memory file buffer on top
- * of a sandboxed `Workspace`.
+ * Stateful workspace controller owning the active in-memory file buffer and
+ * pending edit proposal queue on top of a sandboxed `Workspace`.
  */
 export class WorkspaceState {
   readonly workspace: Workspace;
   private activeBuffer: InternalBuffer | null = null;
+  private readonly pendingProposals = new Map<string, InternalProposal>();
+  private readonly proposalIdByCanonicalPath = new Map<string, string>();
 
   constructor(workspace: Workspace) {
     this.workspace = workspace;
@@ -137,6 +214,44 @@ export class WorkspaceState {
   /** Read-only snapshot of the currently open file buffer, or `null` if none is open. */
   get activeFile(): OpenFileBuffer | null {
     return this.activeBuffer ? toSnapshot(this.activeBuffer) : null;
+  }
+
+  /** Read-only snapshot of all pending proposals keyed by proposal UUID. */
+  get proposals(): ReadonlyMap<string, PendingChange> {
+    const snapshot = new Map<string, PendingChange>();
+    for (const [id, proposal] of this.pendingProposals) {
+      snapshot.set(id, toProposalSnapshot(proposal));
+    }
+    return snapshot;
+  }
+
+  /** Returns all pending proposals in insertion order. */
+  listProposals(): PendingChange[] {
+    return Array.from(this.pendingProposals.values(), toProposalSnapshot);
+  }
+
+  /** Returns a snapshot of the pending proposal with the given `id`, or `null` if absent. */
+  getProposal(id: string): PendingChange | null {
+    const proposal = this.pendingProposals.get(id);
+    return proposal ? toProposalSnapshot(proposal) : null;
+  }
+
+  /** Returns the pending proposal targeting `relPath`, or `null` if none exists. */
+  getProposalForPath(relPath: string): PendingChange | null {
+    const { normalized, resolved } = this.validatePathInSandbox(relPath);
+    const id = this.proposalIdByCanonicalPath.get(resolved);
+    if (id !== undefined) {
+      const proposal = this.pendingProposals.get(id);
+      if (proposal) {
+        return toProposalSnapshot(proposal);
+      }
+    }
+    for (const proposal of this.pendingProposals.values()) {
+      if (proposal.path === normalized) {
+        return toProposalSnapshot(proposal);
+      }
+    }
+    return null;
   }
 
   /**
@@ -442,6 +557,134 @@ export class WorkspaceState {
     return matches;
   }
 
+  /**
+   * Stages a proposed edit to a `.md` file without writing to disk.
+   *
+   * Reads the current file content via `readFile(relPath)` (live unsaved buffer
+   * if open, else disk) to compute `baseHash` and `diffLines`, and enforces at
+   * most one active proposal per canonical file path by replacing any prior one.
+   */
+  proposeEdit(relPath: string, newContent: string, reason: string): PendingChange {
+    const { normalized, resolved } = this.validatePathInSandbox(relPath);
+    sandbox.ensureMarkdownPath(relPath, relPath);
+    sandbox.ensureMarkdownPath(resolved, relPath);
+
+    const current = this.readFile(relPath);
+    const canonicalPath =
+      this.activeBuffer && this.matchesActive(normalized, resolved)
+        ? this.activeBuffer.canonicalPath
+        : sandbox.resolveExisting(this.workspace.root, relPath);
+
+    const existingId = this.proposalIdByCanonicalPath.get(canonicalPath);
+    if (existingId !== undefined) {
+      this.pendingProposals.delete(existingId);
+    }
+
+    const proposal: InternalProposal = {
+      id: randomUUID(),
+      path: current.path,
+      canonicalPath,
+      baseHash: current.contentHash,
+      proposedContent: newContent,
+      reason,
+      diffLines: computeLineDiff(current.content, newContent),
+      createdAt: new Date().toISOString(),
+    };
+
+    this.pendingProposals.set(proposal.id, proposal);
+    this.proposalIdByCanonicalPath.set(canonicalPath, proposal.id);
+
+    return toProposalSnapshot(proposal);
+  }
+
+  /**
+   * Accepts a pending proposal by `id`, writing its `proposedContent` atomically
+   * to disk and updating the active open buffer if that file is currently open.
+   *
+   * Unless `options.force` is `true`, verifies the current content hash (live
+   * buffer if open, else disk) still matches `proposal.baseHash`. On mismatch,
+   * keeps the proposal queued and returns `{ status: "conflict", ... }`.
+   */
+  acceptProposal(id: string, options?: AcceptProposalOptions): AcceptProposalResult {
+    const proposal = this.pendingProposals.get(id);
+    if (!proposal) {
+      throw WorkspaceError.proposalNotFound(id);
+    }
+
+    const isActive = this.matchesProposalActive(proposal);
+    const currentHash = isActive
+      ? this.activeBuffer!.contentHash
+      : this.readDiskHashOrNull(proposal.path);
+
+    const force = options?.force === true;
+    if (!force && currentHash !== proposal.baseHash) {
+      return {
+        status: "conflict",
+        proposal: toProposalSnapshot(proposal),
+        currentHash,
+      };
+    }
+
+    this.workspace.saveFile(proposal.path, proposal.proposedContent);
+
+    let openFile: OpenFileBuffer | null = null;
+    if (this.activeBuffer && isActive) {
+      const nextHash = hashContent(proposal.proposedContent);
+      this.activeBuffer.canonicalPath = sandbox.resolveExisting(
+        this.workspace.root,
+        this.activeBuffer.path,
+      );
+      this.activeBuffer.content = proposal.proposedContent;
+      this.activeBuffer.contentHash = nextHash;
+      this.activeBuffer.diskHash = nextHash;
+      this.activeBuffer.hasExternalConflict = false;
+      openFile = toSnapshot(this.activeBuffer);
+    }
+
+    this.removeProposal(proposal);
+
+    return {
+      status: "accepted",
+      id: proposal.id,
+      path: proposal.path,
+      openFile,
+    };
+  }
+
+  /**
+   * Rejects and removes a pending proposal by `id` without touching disk or
+   * the active open file buffer.
+   */
+  rejectProposal(id: string): PendingChange {
+    const proposal = this.pendingProposals.get(id);
+    if (!proposal) {
+      throw WorkspaceError.proposalNotFound(id);
+    }
+
+    this.removeProposal(proposal);
+    return toProposalSnapshot(proposal);
+  }
+
+  /**
+   * Attempts to accept every pending proposal with `force: false`, applying all
+   * clean proposals and leaving conflicted ones intact in the queue.
+   */
+  acceptAllProposals(): AcceptAllProposalsResult {
+    const accepted: AcceptedProposalResult[] = [];
+    const conflicted: ConflictedProposalResult[] = [];
+
+    for (const id of Array.from(this.pendingProposals.keys())) {
+      const result = this.acceptProposal(id, { force: false });
+      if (result.status === "accepted") {
+        accepted.push(result);
+      } else {
+        conflicted.push(result);
+      }
+    }
+
+    return { accepted, conflicted };
+  }
+
   private validatePathInSandbox(relPath: string): { normalized: string; resolved: string } {
     const normalized = toForwardSlashRelative(relPath);
     const resolved = sandbox.resolveForWrite(this.workspace.root, relPath);
@@ -453,6 +696,23 @@ export class WorkspaceState {
       return false;
     }
     return normalized === this.activeBuffer.path || resolved === this.activeBuffer.canonicalPath;
+  }
+
+  private matchesProposalActive(proposal: InternalProposal): boolean {
+    if (!this.activeBuffer) {
+      return false;
+    }
+    return (
+      proposal.path === this.activeBuffer.path ||
+      proposal.canonicalPath === this.activeBuffer.canonicalPath
+    );
+  }
+
+  private removeProposal(proposal: InternalProposal): void {
+    this.pendingProposals.delete(proposal.id);
+    if (this.proposalIdByCanonicalPath.get(proposal.canonicalPath) === proposal.id) {
+      this.proposalIdByCanonicalPath.delete(proposal.canonicalPath);
+    }
   }
 
   private readDiskHashOrNull(relPath: string): string | null {
