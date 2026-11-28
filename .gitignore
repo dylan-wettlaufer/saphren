@@ -1,12 +1,11 @@
 docs/.obsidian
 
-# Node / Frontend
+# Node / Electron / Build
 node_modules/
+out/
 dist/
-
-# Rust / Tauri
-target/
-src-tauri/gen/
+release/
+*.tsbuildinfo
 
 # OS
 .DS_Store
