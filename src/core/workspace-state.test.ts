@@ -388,3 +388,293 @@ describe("WorkspaceState", () => {
     },
   );
 });
+
+describe("WorkspaceState proposals", () => {
+  it("never modifies disk on proposeEdit and replaces an existing proposal for the same file", () => {
+    const dir = makeTempDir();
+    fs.mkdirSync(path.join(dir, "docs"), { recursive: true });
+    const filePath = path.join(dir, "docs/notes.md");
+    fs.writeFileSync(filePath, "# Title\nOriginal line\n");
+
+    const state = WorkspaceState.open(dir);
+    expect(state.proposals.size).toBe(0);
+
+    const first = state.proposeEdit(
+      "./docs/notes.md",
+      "# Title\nFirst draft\n",
+      "Initial rewrite",
+    );
+
+    expect(first.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(first.path).toBe("docs/notes.md");
+    expect(first.baseHash).toBe(hashContent("# Title\nOriginal line\n"));
+    expect(first.proposedContent).toBe("# Title\nFirst draft\n");
+    expect(first.reason).toBe("Initial rewrite");
+    expect(first.diffLines).toEqual([
+      { type: "context", value: "# Title" },
+      { type: "removed", value: "Original line" },
+      { type: "added", value: "First draft" },
+    ]);
+    expect(Number.isNaN(Date.parse(first.createdAt))).toBe(false);
+    expect(state.proposals.size).toBe(1);
+    expect(state.getProposal(first.id)).toEqual(first);
+    expect(state.getProposalForPath("docs/notes.md")).toEqual(first);
+
+    // Disk must remain completely untouched.
+    expect(fs.readFileSync(filePath, "utf8")).toBe("# Title\nOriginal line\n");
+
+    // A second proposal targeting the same file (even via a non-canonical relative path)
+    // replaces the previous proposal.
+    const second = state.proposeEdit(
+      "docs/../docs/notes.md",
+      "# Title\nSecond draft\n",
+      "Refined rewrite",
+    );
+
+    expect(second.id).not.toBe(first.id);
+    expect(second.path).toBe("docs/notes.md");
+    expect(second.reason).toBe("Refined rewrite");
+    expect(state.proposals.size).toBe(1);
+    expect(state.getProposal(first.id)).toBeNull();
+    expect(state.getProposal(second.id)).toEqual(second);
+    expect(state.getProposalForPath("docs/notes.md")).toEqual(second);
+    expect(fs.readFileSync(filePath, "utf8")).toBe("# Title\nOriginal line\n");
+
+    // Sandbox and file-type validation still apply.
+    fs.writeFileSync(path.join(dir, "plain.txt"), "hello");
+    expectErrorCode(() => state.proposeEdit("../escape.md", "x", "bad"), "PathOutsideRoot");
+    expectErrorCode(() => state.proposeEdit("plain.txt", "x", "bad"), "UnsupportedFileType");
+    expectErrorCode(() => state.proposeEdit("docs/missing.md", "x", "bad"), "NotFound");
+    expectErrorCode(() => state.proposeEdit("docs", "x", "bad"), "UnsupportedFileType");
+  });
+
+  it("computes baseHash and diffLines against the live unsaved buffer on a dirty open file", () => {
+    const dir = makeTempDir();
+    const filePath = path.join(dir, "notes.md");
+    fs.writeFileSync(filePath, "# Notes\nDisk line\n");
+
+    const state = WorkspaceState.open(dir);
+    state.openFile("notes.md");
+    state.updateBuffer("notes.md", "# Notes\nLive unsaved line\n");
+
+    const proposal = state.proposeEdit(
+      "notes.md",
+      "# Notes\nLive unsaved line\nAdded by agent\n",
+      "Append agent summary",
+    );
+
+    expect(proposal.baseHash).toBe(hashContent("# Notes\nLive unsaved line\n"));
+    expect(proposal.baseHash).not.toBe(hashContent("# Notes\nDisk line\n"));
+    expect(proposal.diffLines).toEqual([
+      { type: "context", value: "# Notes" },
+      { type: "context", value: "Live unsaved line" },
+      { type: "added", value: "Added by agent" },
+    ]);
+    // Disk still holds the original saved text and open buffer stays dirty.
+    expect(fs.readFileSync(filePath, "utf8")).toBe("# Notes\nDisk line\n");
+    expect(state.activeFile?.isDirty).toBe(true);
+  });
+
+  it("accepts a matching proposal, writes to disk, updates openFile, and clears isDirty", () => {
+    const dir = makeTempDir();
+    const openPath = path.join(dir, "open.md");
+    const closedPath = path.join(dir, "closed.md");
+    fs.writeFileSync(openPath, "disk v1\n");
+    fs.writeFileSync(closedPath, "closed v1\n");
+
+    const state = WorkspaceState.open(dir);
+    state.openFile("open.md");
+    state.updateBuffer("open.md", "unsaved v2\n");
+
+    const openProposal = state.proposeEdit("open.md", "proposed v3\n", "Apply v3");
+    const closedProposal = state.proposeEdit("closed.md", "closed v2\n", "Update closed");
+
+    // Accepting a proposal for a non-open file writes disk and leaves the active file intact.
+    const closedResult = state.acceptProposal(closedProposal.id);
+    expect(closedResult).toEqual({
+      status: "accepted",
+      id: closedProposal.id,
+      path: "closed.md",
+      openFile: null,
+    });
+    expect(fs.readFileSync(closedPath, "utf8")).toBe("closed v2\n");
+    expect(state.getProposal(closedProposal.id)).toBeNull();
+    expect(state.activeFile?.path).toBe("open.md");
+    expect(state.activeFile?.isDirty).toBe(true);
+
+    // Accepting the open file's proposal writes to disk, updates openFile, and clears isDirty.
+    const openResult = state.acceptProposal(openProposal.id);
+    const expectedHash = hashContent("proposed v3\n");
+    expect(openResult).toEqual({
+      status: "accepted",
+      id: openProposal.id,
+      path: "open.md",
+      openFile: {
+        path: "open.md",
+        content: "proposed v3\n",
+        contentHash: expectedHash,
+        diskHash: expectedHash,
+        isDirty: false,
+        hasExternalConflict: false,
+      },
+    });
+    expect(fs.readFileSync(openPath, "utf8")).toBe("proposed v3\n");
+    expect(state.activeFile).toEqual(openResult.status === "accepted" ? openResult.openFile : null);
+    expect(state.proposals.size).toBe(0);
+  });
+
+  it("returns conflict when edited afterward and succeeds when accepted with force: true", () => {
+    const dir = makeTempDir();
+    const openPath = path.join(dir, "notes.md");
+    const closedPath = path.join(dir, "other.md");
+    fs.writeFileSync(openPath, "initial\n");
+    fs.writeFileSync(closedPath, "other v1\n");
+
+    const state = WorkspaceState.open(dir);
+    state.openFile("notes.md");
+    const proposal = state.proposeEdit("notes.md", "agent version\n", "Rewrite note");
+
+    // User edits the open file after the proposal arrived.
+    state.updateBuffer("notes.md", "user newer edit\n");
+
+    const conflict = state.acceptProposal(proposal.id);
+    expect(conflict).toEqual({
+      status: "conflict",
+      proposal,
+      currentHash: hashContent("user newer edit\n"),
+    });
+    // Proposal stays in the queue; disk and live buffer are untouched.
+    expect(state.proposals.size).toBe(1);
+    expect(state.getProposal(proposal.id)).toEqual(proposal);
+    expect(fs.readFileSync(openPath, "utf8")).toBe("initial\n");
+    expect(state.activeFile?.content).toBe("user newer edit\n");
+    expect(state.activeFile?.isDirty).toBe(true);
+
+    // Accepting with force: true overwrites disk, updates openFile cleanly, and removes proposal.
+    const forced = state.acceptProposal(proposal.id, { force: true });
+    const agentHash = hashContent("agent version\n");
+    expect(forced).toEqual({
+      status: "accepted",
+      id: proposal.id,
+      path: "notes.md",
+      openFile: {
+        path: "notes.md",
+        content: "agent version\n",
+        contentHash: agentHash,
+        diskHash: agentHash,
+        isDirty: false,
+        hasExternalConflict: false,
+      },
+    });
+    expect(fs.readFileSync(openPath, "utf8")).toBe("agent version\n");
+    expect(state.proposals.size).toBe(0);
+
+    // External deletion of a closed file also triggers conflict with currentHash: null.
+    const deletedProposal = state.proposeEdit("other.md", "recreated\n", "Update other");
+    fs.unlinkSync(closedPath);
+    const deletedConflict = state.acceptProposal(deletedProposal.id);
+    expect(deletedConflict).toEqual({
+      status: "conflict",
+      proposal: deletedProposal,
+      currentHash: null,
+    });
+    expect(state.getProposal(deletedProposal.id)).toEqual(deletedProposal);
+
+    // Force-accepting recreates the file cleanly.
+    const recreated = state.acceptProposal(deletedProposal.id, { force: true });
+    expect(recreated.status).toBe("accepted");
+    expect(fs.readFileSync(closedPath, "utf8")).toBe("recreated\n");
+  });
+
+  it("rejects a proposal without touching disk or openFile and errors on unknown IDs", () => {
+    const dir = makeTempDir();
+    const filePath = path.join(dir, "notes.md");
+    fs.writeFileSync(filePath, "saved\n");
+
+    const state = WorkspaceState.open(dir);
+    state.openFile("notes.md");
+    state.updateBuffer("notes.md", "unsaved draft\n");
+
+    const proposal = state.proposeEdit("notes.md", "agent edit\n", "Polish");
+    const rejected = state.rejectProposal(proposal.id);
+
+    expect(rejected).toEqual(proposal);
+    expect(state.proposals.size).toBe(0);
+    expect(state.getProposalForPath("notes.md")).toBeNull();
+    expect(fs.readFileSync(filePath, "utf8")).toBe("saved\n");
+    expect(state.activeFile?.content).toBe("unsaved draft\n");
+    expect(state.activeFile?.isDirty).toBe(true);
+
+    expectErrorCode(() => state.rejectProposal(proposal.id), "ProposalNotFound");
+    expectErrorCode(() => state.acceptProposal("missing-id"), "ProposalNotFound");
+  });
+
+  it("applies clean proposals and keeps conflicted proposals queued in acceptAllProposals", () => {
+    const dir = makeTempDir();
+    const aPath = path.join(dir, "a.md");
+    const bPath = path.join(dir, "b.md");
+    const cPath = path.join(dir, "c.md");
+    fs.writeFileSync(aPath, "A v1\n");
+    fs.writeFileSync(bPath, "B v1\n");
+    fs.writeFileSync(cPath, "C v1\n");
+
+    const state = WorkspaceState.open(dir);
+    state.openFile("a.md");
+
+    const propA = state.proposeEdit("a.md", "A v2\n", "Update A");
+    const propB = state.proposeEdit("b.md", "B v2\n", "Update B");
+    const propC = state.proposeEdit("c.md", "C v2\n", "Update C");
+
+    // Introduce a conflict only on b.md (on disk).
+    fs.writeFileSync(bPath, "B edited externally\n");
+
+    const batch = state.acceptAllProposals();
+
+    expect(batch.accepted).toHaveLength(2);
+    expect(batch.accepted.map((item) => item.path)).toEqual(["a.md", "c.md"]);
+    expect(batch.accepted[0]?.id).toBe(propA.id);
+    expect(batch.accepted[0]?.openFile?.content).toBe("A v2\n");
+    expect(batch.accepted[0]?.openFile?.isDirty).toBe(false);
+    expect(batch.accepted[1]?.id).toBe(propC.id);
+    expect(batch.accepted[1]?.openFile).toBeNull();
+
+    expect(batch.conflicted).toEqual([
+      {
+        status: "conflict",
+        proposal: propB,
+        currentHash: hashContent("B edited externally\n"),
+      },
+    ]);
+
+    // Clean proposals were written to disk; conflicted file was NOT overwritten and stays queued.
+    expect(fs.readFileSync(aPath, "utf8")).toBe("A v2\n");
+    expect(fs.readFileSync(bPath, "utf8")).toBe("B edited externally\n");
+    expect(fs.readFileSync(cPath, "utf8")).toBe("C v2\n");
+    expect(state.activeFile?.content).toBe("A v2\n");
+    expect(state.activeFile?.isDirty).toBe(false);
+
+    expect(state.proposals.size).toBe(1);
+    expect(state.listProposals()).toEqual([propB]);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "enforces one proposal per canonical file across internal symlink aliases",
+    () => {
+      const dir = makeTempDir();
+      fs.mkdirSync(path.join(dir, "sub"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "sub/real.md"), "base\n");
+      fs.symlinkSync(path.join(dir, "sub/real.md"), path.join(dir, "alias.md"));
+
+      const state = WorkspaceState.open(dir);
+      const p1 = state.proposeEdit("sub/real.md", "v1\n", "First");
+      const p2 = state.proposeEdit("alias.md", "v2\n", "Second via alias");
+
+      expect(state.proposals.size).toBe(1);
+      expect(state.getProposal(p1.id)).toBeNull();
+      expect(state.getProposal(p2.id)).toEqual(p2);
+      expect(state.getProposalForPath("sub/real.md")).toEqual(p2);
+    },
+  );
+});

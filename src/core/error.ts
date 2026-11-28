@@ -9,6 +9,7 @@ export type WorkspaceErrorCode =
   | "NoOpenFile"
   | "ActiveFileMismatch"
   | "UnsavedChanges"
+  | "ProposalNotFound"
   | "Io";
 
 /** Error thrown by sandboxed workspace operations in `src/core`. */
@@ -88,6 +89,14 @@ export class WorkspaceError extends Error {
       "UnsavedChanges",
       activePath,
       `active file '${activePath}' has unsaved changes`,
+    );
+  }
+
+  static proposalNotFound(proposalId: string): WorkspaceError {
+    return new WorkspaceError(
+      "ProposalNotFound",
+      proposalId,
+      `proposal not found: ${proposalId}`,
     );
   }
 
